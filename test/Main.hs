@@ -10,12 +10,12 @@ import Data.Kind
 import GHC.TypeLits
 import HasFunction
 import Data.String
-import qualified Data.Proxy as P
 import Test.Tasty
 import Test.Tasty.HUnit
+import Data.Proxy
 -- default ()
 
-caller2 :: Int -> Int
+caller2 :: (Num a) => a -> a
 caller2 = getFun (Proxy :: Proxy "num")
 
 
@@ -59,7 +59,7 @@ fail = const ()
 
 xings = show (5 :: Int)
 
-proBool :: P.Proxy (x :: Bool) -> ()
+proBool :: Proxy (x :: Bool) -> ()
 proBool _ = ()
 
 
