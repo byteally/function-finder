@@ -75,6 +75,7 @@ hasFunSolver :: (Class, (TyCon, TyCon), Module) -> [Ct] -> [Ct] -> [Ct] ->
                  TcPluginM TcPluginResult
 hasFunSolver (hasFunCls, prx, md) _ _ wanteds = do
   curModule <- unsafeTcPluginTcM $ getModule
+  -- Found _ curModule <- findImportedModule (mkModuleName "PolyKinded") Nothing    
   -- Found _ md'   <- findImportedModule (mkModuleName "Test.FilterProcessing.Pure") Nothing  
   funBs <- mapM (\(_, (lab, _)) -> case isStrLitTy lab of
            Just funName -> do
@@ -170,12 +171,12 @@ wrap ct _ cls prx (lab, reqSig, Right (bn, e)) = do
       let ps = dicts tcv
       evBinds <- solveDicts ps
       case evidenceOf ps evBinds of
-        evs -> do
-          let evExpr = evidenceExpr cls prx tyVars reqSig lab tcv e evs
+        evs | (all isRight evs) -> do
+          let evExpr = evidenceExpr cls prx tyVars reqSig lab tcv e evs evBinds
           case eqType (noForall (substTy tcv givenSig)) (noForall (substTy tcv reqSig)) of
             True -> pure (CtSolved (substDict tcv ct) evExpr)
             False -> pure (Unmatched ct bn reqSig (exprType e))
-        -- (ps, _) -> pure (NeedMoreCt ct bn ps)          
+        evs -> pure (NeedMoreCt ct bn (lefts evs))
   where
     substDict tcv ctd@CDictCan {} =
       ctd { cc_ev = (cc_ev ctd) { ctev_pred = substTy tcv (ctev_pred (cc_ev ctd)) } }
@@ -184,11 +185,11 @@ wrap ct _ cls prx (lab, reqSig, Right (bn, e)) = do
     (funArgs, _) = splitFunTys givenSig
     dicts tcv = map (substTy tcv) (takeWhile isPredTy funArgs)
     
-evidenceExpr :: Class -> (TyCon, TyCon) -> [TyVar] -> Type -> Type -> TCvSubst -> CoreExpr -> [Either Type EvBind] -> EvTerm
-evidenceExpr cls (prx, sym) tyVars reqSig lab tcv expr evs = appDc
+evidenceExpr :: Class -> (TyCon, TyCon) -> [TyVar] -> Type -> Type -> TCvSubst -> CoreExpr -> [Either Type EvBind] -> [EvBind] -> EvTerm
+evidenceExpr cls (prx, sym) tyVars reqSig lab tcv expr evs evBinds = appDc
   where
     lamExpr = lams (labPx : lefts evs)
-              (\(_ : vs) -> letsEvBind (rights evs) $
+              (\(_ : vs) -> letsEvBind evBinds $
                            mkCoreApps expr (map Type (mappedTys tcv) ++
                                             map evidence (zipEv evs vs)
                                            )
@@ -244,8 +245,9 @@ newVar ty = mkSysLocal (mkFastString "x") (mkBuiltinUnique i) ty
   where i = hash (showSDocUnsafe (ppr ty))
 
 tcSubstMapMaybe :: Type -> Type -> Maybe TCvSubst
-tcSubstMapMaybe t1 t2 = subVars
-  where subVars = tcUnifyTyWithTFs True (noForall t2) (noForall t1)
+tcSubstMapMaybe t1 t2 = pprTraceIt "t1, t2: " (t1, t2, subVars)
+                         `seq` subVars
+  where subVars = tcMatchTyKi (noForall t2) (noForall t1)
 
 noForall :: Type -> Type
 noForall = splitDicts . snd . splitForAllTys

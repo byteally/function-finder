@@ -31,12 +31,13 @@ test-suite function-finder-test
   type:             exitcode-stdio-1.0           
   hs-source-dirs:   test
   main-is:          Main.hs
+  other-modules:    PolyKinded
 
   build-depends:    base            >= 4.10 && < 5
                   , function-finder
                   , tasty
                   , tasty-hunit
                                     
-  ghc-options:      -Wall -Werror -O2 
+  ghc-options:      -Wall -O2 
   
      
