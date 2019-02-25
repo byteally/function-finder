@@ -4,8 +4,8 @@
 
 module ConstraintSolver (plugin) where
 
-import Module     (mkModuleName, Module, getModule)
-import OccName    (mkTcOcc, mkVarOcc)
+import Module     (mkModuleName, Module, getModule, moduleEnvElts)
+import OccName    (mkTcOcc, mkVarOcc, mkMethodOcc, mkDefaultMethodOcc)
 import Plugins    (Plugin (..), defaultPlugin)
 import TcType
 import Bag        (bagToList)
@@ -13,7 +13,8 @@ import TcEvidence
 import TcEnv      (tcLookupIdMaybe, getInLocalScope)
 import TcPluginM
 import TcRnTypes
-import TcRnMonad
+import TcRnMonad  (foldlM, getCtLocM, getGblEnv)
+import qualified TcRnMonad  as TcRn (getTopEnv)
 import Class
 import CoreUtils
 import MkCore
@@ -38,6 +39,11 @@ import Data.Hashable
 import Data.Either
 import DataCon
 import TysWiredIn
+import Control.Monad.IO.Class (MonadIO (..))
+import HscTypes
+import UniqDFM (udfmToList)
+import Name (Name, getOccString)
+import Avail
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -75,17 +81,20 @@ hasFunSolver :: (Class, (TyCon, TyCon), Module) -> [Ct] -> [Ct] -> [Ct] ->
                  TcPluginM TcPluginResult
 hasFunSolver (hasFunCls, prx, md) _ _ wanteds = do
   curModule <- unsafeTcPluginTcM $ getModule
-  -- Found _ curModule <- findImportedModule (mkModuleName "PolyKinded") Nothing    
-  -- Found _ md'   <- findImportedModule (mkModuleName "Test.FilterProcessing.Pure") Nothing  
+  -- Found _ curModule <- findImportedModule (mkModuleName "Prelude") Nothing    
+  -- Found _ md'   <- findImportedModule (mkModuleName "Prelude") Nothing  
   funBs <- mapM (\(_, (lab, _)) -> case isStrLitTy lab of
            Just funName -> do
              let funStr = unpackFS funName
              funBinding <- lookupOrig curModule (mkVarOcc funStr)
-             maybe (Left (Just funName)) (Right . (funName, )) <$> (unsafeTcPluginTcM $ do 
+             maybe (Left (Just funName)) (Right . (funName, )) <$> (unsafeTcPluginTcM $ do
                                                                        f <- getInLocalScope
                                                                        case (f funBinding) of
                                                                          True -> tcLookupIdMaybe funBinding
-                                                                         False -> pure Nothing
+                                                                         False -> do
+                                                                           Just mn <- lookupInScope funStr
+                                                                           tcLookupIdMaybe mn
+                                                                         
                                                                    )
            Nothing -> pure (Left Nothing)
                ) our_wanteds
@@ -172,7 +181,7 @@ wrap ct _ cls prx (lab, reqSig, Right (bn, e)) = do
       evBinds <- solveDicts ps
       case evidenceOf ps evBinds of
         evs | (all isRight evs) -> do
-          let evExpr = evidenceExpr cls prx tyVars reqSig lab tcv e evs evBinds
+          evExpr <- unsafeTcPluginTcM $ evidenceExpr cls prx tyVars reqSig lab tcv e evs evBinds
           case eqType (noForall (substTy tcv givenSig)) (noForall (substTy tcv reqSig)) of
             True -> pure (CtSolved (substDict tcv ct) evExpr)
             False -> pure (Unmatched ct bn reqSig (exprType e))
@@ -185,8 +194,10 @@ wrap ct _ cls prx (lab, reqSig, Right (bn, e)) = do
     (funArgs, _) = splitFunTys givenSig
     dicts tcv = map (substTy tcv) (takeWhile isPredTy funArgs)
     
-evidenceExpr :: Class -> (TyCon, TyCon) -> [TyVar] -> Type -> Type -> TCvSubst -> CoreExpr -> [Either Type EvBind] -> [EvBind] -> EvTerm
-evidenceExpr cls (prx, sym) tyVars reqSig lab tcv expr evs evBinds = appDc
+evidenceExpr :: Class -> (TyCon, TyCon) -> [TyVar] -> Type -> Type -> TCvSubst -> CoreExpr -> [Either Type EvBind] -> [EvBind] -> TcM EvTerm
+evidenceExpr cls (prx, sym) tyVars reqSig lab tcv expr evs evBinds = do
+  pure appDc
+  
   where
     lamExpr = lams (labPx : lefts evs)
               (\(_ : vs) -> letsEvBind evBinds $
@@ -194,18 +205,6 @@ evidenceExpr cls (prx, sym) tyVars reqSig lab tcv expr evs evBinds = appDc
                                             map evidence (zipEv evs vs)
                                            )
               )
-    {-
-    appDc = mkCoreConApps dc [ Type lab
-                             , Type (substTy tcv (noForall reqSig))
-                             , lams (labPx : lefts evs)
-                               (\(_ : vs) -> letsEvBind (rights evs) $
-                                            evDFunAppWithCon 
-                                            mkCoreApps expr (map Type (mappedTys tcv) ++
-                                                             map evidence (zipEv evs vs)
-                                                            )
-                               )
-                             ]
-    -}
     
     appDc = evDFunAppWithCon dc [lab, (substTy tcv (noForall reqSig))] lamExpr
     labPx = mkTyConApp prx [mkTyConTy sym, lab]
@@ -245,8 +244,7 @@ newVar ty = mkSysLocal (mkFastString "x") (mkBuiltinUnique i) ty
   where i = hash (showSDocUnsafe (ppr ty))
 
 tcSubstMapMaybe :: Type -> Type -> Maybe TCvSubst
-tcSubstMapMaybe t1 t2 = pprTraceIt "t1, t2: " (t1, t2, subVars)
-                         `seq` subVars
+tcSubstMapMaybe t1 t2 = subVars
   where subVars = tcMatchTyKi (noForall t2) (noForall t1)
 
 noForall :: Type -> Type
@@ -272,3 +270,13 @@ letsEvBind es = mkLets [Rec $ map (\evB -> (eb_lhs evB, getEvBExpr $ eb_rhs evB)
 #endif                                
     getEvBExpr _          = error "Panic: nonExpr in EvBind. TODO: Replace with ghc panic"
 
+lookupInScope :: String -> TcM (Maybe Name)
+lookupInScope str = do
+  hscEnv <- TcRn.getTopEnv
+  let ns = (concatMap squash $ concatMap (md_exports . hm_details . snd) (udfmToList $ hsc_HPT hscEnv))
+      squash (Avail n) = [n]
+      squash (AvailTC _ ns _) = ns
+      mn = find (\x -> getOccString x == str) ns
+  case mn of
+    Nothing -> error "Panic: not found in homepackagetable"
+    Just n -> pprTraceIt "mn: " ns `seq` pure mn

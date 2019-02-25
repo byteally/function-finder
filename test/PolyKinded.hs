@@ -21,3 +21,9 @@ instance TFCls (a :: Bool) where
 tffun :: TF True -> TF True
 tffun = tfmeth (Proxy :: Proxy 'True)
 
+class MethTest (a :: Type) where
+  methTest :: a -> String
+
+instance MethTest Int where
+  methTest = show
+

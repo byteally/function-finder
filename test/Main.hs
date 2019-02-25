@@ -1,5 +1,4 @@
 {-# OPTIONS_GHC -dcore-lint               #-}
-{-# OPTIONS_GHC -ddump-prep               #-}
 {-# OPTIONS_GHC -fplugin ConstraintSolver #-}
 {-# LANGUAGE MultiParamTypeClasses        #-}
 {-# LANGUAGE KindSignatures               #-}
@@ -16,7 +15,6 @@ import Data.Proxy
 import PolyKinded
 -- default ()
 
-
 caller1 :: Int -> Int
 caller1 = getFun (Proxy :: Proxy "num")
 
@@ -28,6 +26,9 @@ caller3 = getFun (Proxy :: Proxy "num2")
 
 caller4 :: Double -> Int -> Double
 caller4 = getFun (Proxy :: Proxy "num4")
+
+caller5 :: Int -> String
+caller5 = getFun (Proxy :: Proxy "methTest")
 
 showF :: (Show a) => a -> String
 showF = show
@@ -75,9 +76,11 @@ main = defaultMain $ do
                       , test_caller2
                       , test_caller3
                       , test_caller4
+                      , test_caller5
                       ]
 test_caller1 = testCase "caller1" (caller1 10 @?= 74)
 test_caller2 = testCase "caller2" (caller2 [1,2,3] @?= "[1,2,3]")
 test_caller3 = testCase "caller3" (caller3 25 "foo" @?= 25)
 test_caller4 = testCase "caller4" (caller4 36.5 25 @?= 61.5)
+test_caller5 = testCase "caller5" (caller5 20 @?= "20")
     
