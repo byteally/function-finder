@@ -1,4 +1,5 @@
-{-# OPTIONS_GHC -dcore-lint               #-}
+-- {-# OPTIONS_GHC -dcore-lint               #-}
+{-# OPTIONS_GHC -ddump-prep                #-}
 {-# OPTIONS_GHC -fplugin ConstraintSolver #-}
 {-# LANGUAGE MultiParamTypeClasses        #-}
 {-# LANGUAGE KindSignatures               #-}

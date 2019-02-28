@@ -13,7 +13,7 @@ import TcEvidence
 import TcEnv      (tcLookupIdMaybe, getInLocalScope)
 import TcPluginM
 import TcRnTypes
-import TcRnMonad  (foldlM, getCtLocM, getGblEnv)
+import TcRnMonad  (foldlM, getCtLocM, getGblEnv, captureConstraints)
 import qualified TcRnMonad  as TcRn (getTopEnv)
 import Class
 import CoreUtils
@@ -44,6 +44,14 @@ import HscTypes
 import UniqDFM (udfmToList)
 import Name (Name, getOccString)
 import Avail
+import HsExpr (LHsExpr)
+import HsBinds (LHsBinds)
+import HsExtension (GhcTc, GhcRn)
+import RdrName
+import RnEnv
+import HsUtils (nlHsVar, mkLHsWrap)
+import TcExpr (tcMonoExpr)
+import TcHsSyn (zonkTopLExpr)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -280,3 +288,55 @@ lookupInScope str = do
   case mn of
     Nothing -> error "Panic: not found in homepackagetable"
     Just n -> pprTraceIt "mn: " ns `seq` pure mn
+
+
+mkNewExprRn :: Type -> String -> TcM (LHsExpr GhcTc)
+mkNewExprRn ty s = do
+  -- The names we want to use happen to already be in PrelNames so we use
+  -- them directly.
+  let v = mkRdrUnqual (mkVarOcc s)
+  v' <- lookupOccRn v
+  let raw_expr = nlHsVar v'
+      exp_type = ty
+  typecheckExpr exp_type raw_expr
+
+-- | Check that an expression has the expected type.
+typecheckExpr :: Type -> LHsExpr GhcRn -> TcM (LHsExpr GhcTc)
+typecheckExpr t e = do
+  -- Typecheck the expression and capture generated constraints
+  (unwrapped_expr, wanteds) <- captureConstraints (tcMonoExpr e (Check t))
+  -- Create the wrapper
+  wrapper <- mkWpLet . EvBinds . evBindMapBinds . snd
+              <$> runTcS ( solveWanteds wanteds )
+  -- Apply the wrapper
+  let final_expr = mkLHsWrap wrapper unwrapped_expr
+  -- Zonk to instantiate type variables
+  zonkTopLExpr final_expr
+
+mkExprRn :: String -> Type -> TcM (LHsExpr GhcTc)
+mkExprRn var varTyp = do
+  let varOcc = mkRdrUnqual (mkVarOcc var)
+  varName <- lookupOccRn varOcc
+  typecheckExpr varTyp (nlHsVar varName) 
+  
+
+{-
+mkNewBind :: String -> ModSummary -> LHsExpr GhcTc -> TcM (LHsBinds GhcTc)
+mkNewBind suffix ms rhs = do
+  io_tycon <- tcLookupTyCon ioTyConName
+  -- Make the `Id` for the new binding
+  let var_name = "myBinding_" ++ suffix
+  bind_name <- newGlobalBinder (ms_mod ms) (mkVarOcc var_name) (noSrcSpan)
+  let
+    bind_id = mkVanillaGlobal bind_name (mkTyConApp io_tycon [unitTy])
+    bind = FunBind emptyNameSet (noLoc bind_id) mg idHsWrapper []
+
+    mg = MG mg_tc (noLoc [match]) Generated
+    mg_tc = MatchGroupTc [] (mkTyConApp io_tycon [unitTy])
+
+    match = noLoc (Match noExt match_ctxt [] grhss)
+    match_ctxt = FunRhs (noLoc bind_name) Prefix SrcLazy
+
+    grhss = GRHSs noExt [(noLoc (GRHS noExt [] rhs))] (noLoc (EmptyLocalBinds noExt))
+  return (unitBag (noLoc bind))
+-}
