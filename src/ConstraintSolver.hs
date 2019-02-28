@@ -8,7 +8,7 @@ import Module     (mkModuleName, Module, getModule, moduleEnvElts)
 import OccName    (mkTcOcc, mkVarOcc, mkMethodOcc, mkDefaultMethodOcc)
 import Plugins    (Plugin (..), defaultPlugin)
 import TcType
-import Bag        (bagToList)
+import Bag        (bagToList, unitBag)
 import TcEvidence
 import TcEnv      (tcLookupIdMaybe, getInLocalScope)
 import TcPluginM
@@ -44,14 +44,18 @@ import HscTypes
 import UniqDFM (udfmToList)
 import Name (Name, getOccString)
 import Avail
-import HsExpr (LHsExpr)
-import HsBinds (LHsBinds)
-import HsExtension (GhcTc, GhcRn)
+import HsExpr (LHsExpr, GRHS (..), GRHSs (..), HsMatchContext (..), Match (..), MatchGroup (..), MatchGroupTc (..))
+import HsBinds (LHsBinds, HsLocalBindsLR (..), HsBindLR (..))
+import HsExtension (GhcTc, GhcRn, noExt)
 import RdrName
 import RnEnv
 import HsUtils (nlHsVar, mkLHsWrap)
 import TcExpr (tcMonoExpr)
 import TcHsSyn (zonkTopLExpr)
+import SrcLoc (noLoc, noSrcSpan)
+import IfaceEnv (newGlobalBinder)
+import NameSet (emptyNameSet)
+import BasicTypes (Origin (..), LexicalFixity (..))
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -319,24 +323,19 @@ mkExprRn var varTyp = do
   varName <- lookupOccRn varOcc
   typecheckExpr varTyp (nlHsVar varName) 
   
-
-{-
-mkNewBind :: String -> ModSummary -> LHsExpr GhcTc -> TcM (LHsBinds GhcTc)
-mkNewBind suffix ms rhs = do
-  io_tycon <- tcLookupTyCon ioTyConName
-  -- Make the `Id` for the new binding
-  let var_name = "myBinding_" ++ suffix
-  bind_name <- newGlobalBinder (ms_mod ms) (mkVarOcc var_name) (noSrcSpan)
+mkNewBind :: String -> Type -> ModSummary -> LHsExpr GhcTc -> TcM (LHsBinds GhcTc)
+mkNewBind varStr varTyp ms varRhs = do
+  let varName = "mono_" ++ varStr
+  bind_name <- newGlobalBinder (ms_mod ms) (mkVarOcc varName) noSrcSpan
   let
-    bind_id = mkVanillaGlobal bind_name (mkTyConApp io_tycon [unitTy])
+    bind_id = mkVanillaGlobal bind_name varTyp
     bind = FunBind emptyNameSet (noLoc bind_id) mg idHsWrapper []
 
     mg = MG mg_tc (noLoc [match]) Generated
-    mg_tc = MatchGroupTc [] (mkTyConApp io_tycon [unitTy])
+    mg_tc = MatchGroupTc [] varTyp
 
     match = noLoc (Match noExt match_ctxt [] grhss)
     match_ctxt = FunRhs (noLoc bind_name) Prefix SrcLazy
 
-    grhss = GRHSs noExt [(noLoc (GRHS noExt [] rhs))] (noLoc (EmptyLocalBinds noExt))
+    grhss = GRHSs noExt [(noLoc (GRHS noExt [] varRhs))] (noLoc (EmptyLocalBinds noExt))
   return (unitBag (noLoc bind))
--}
