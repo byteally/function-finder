@@ -2,9 +2,11 @@
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE BangPatterns        #-}
 
-module ConstraintSolver (plugin) where
+module ConstraintSolver (plugin, splitOnMany) where
 
-import Module     (mkModuleName, Module, getModule, moduleEnvElts)
+import Module     (mkModuleName, Module, getModule, moduleEnvElts, moduleEnvToList, filterModuleEnv, moduleEnvKeys, moduleName)
+import NameCache  (nsNames)
+import GHC        (getModuleInfo)
 import OccName    (mkTcOcc, mkVarOcc, mkMethodOcc, mkDefaultMethodOcc)
 import Plugins    (Plugin (..), defaultPlugin)
 import TcType
@@ -13,8 +15,8 @@ import TcEvidence
 import TcEnv      (tcLookupIdMaybe, getInLocalScope)
 import TcPluginM
 import TcRnTypes
-import TcRnMonad  (foldlM, getCtLocM, getGblEnv, captureConstraints)
-import qualified TcRnMonad  as TcRn (getTopEnv)
+import TcRnMonad  (foldlM, getCtLocM, captureConstraints, readMutVar)
+import qualified TcRnMonad  as TcRn (getTopEnv, getGblEnv)
 import Class
 import CoreUtils
 import MkCore
@@ -42,7 +44,7 @@ import TysWiredIn
 import Control.Monad.IO.Class (MonadIO (..))
 import HscTypes
 import UniqDFM (udfmToList)
-import Name (Name, getOccString)
+import Name (Name, getOccString, occNameString, occEnvElts, nameOccName)
 import Avail
 import HsExpr (LHsExpr, GRHS (..), GRHSs (..), HsMatchContext (..), Match (..), MatchGroup (..), MatchGroupTc (..))
 import HsBinds (LHsBinds, HsLocalBindsLR (..), HsBindLR (..))
@@ -54,6 +56,7 @@ import TcExpr (tcMonoExpr)
 import TcHsSyn (zonkTopLExpr)
 import SrcLoc (noLoc, noSrcSpan)
 import IfaceEnv (newGlobalBinder)
+import qualified IfaceEnv as IF (lookupOrig)
 import NameSet (emptyNameSet)
 import BasicTypes (Origin (..), LexicalFixity (..))
 
@@ -92,22 +95,10 @@ findClassConstraint cls ct = do
 hasFunSolver :: (Class, (TyCon, TyCon), Module) -> [Ct] -> [Ct] -> [Ct] ->
                  TcPluginM TcPluginResult
 hasFunSolver (hasFunCls, prx, md) _ _ wanteds = do
-  curModule <- unsafeTcPluginTcM $ getModule
-  -- Found _ curModule <- findImportedModule (mkModuleName "Prelude") Nothing    
-  -- Found _ md'   <- findImportedModule (mkModuleName "Prelude") Nothing  
   funBs <- mapM (\(_, (lab, _)) -> case isStrLitTy lab of
            Just funName -> do
              let funStr = unpackFS funName
-             funBinding <- lookupOrig curModule (mkVarOcc funStr)
-             maybe (Left (Just funName)) (Right . (funName, )) <$> (unsafeTcPluginTcM $ do
-                                                                       f <- getInLocalScope
-                                                                       case (f funBinding) of
-                                                                         True -> tcLookupIdMaybe funBinding
-                                                                         False -> do
-                                                                           Just mn <- lookupInScope funStr
-                                                                           tcLookupIdMaybe mn
-                                                                         
-                                                                   )
+             maybe (Left (Just funName)) (Right . (funName, )) <$> lookupInScope funStr             
            Nothing -> pure (Left Nothing)
                ) our_wanteds
   (solved, newWanteds) <- result funBs >>= tcPluginResult md
@@ -282,60 +273,33 @@ letsEvBind es = mkLets [Rec $ map (\evB -> (eb_lhs evB, getEvBExpr $ eb_rhs evB)
 #endif                                
     getEvBExpr _          = error "Panic: nonExpr in EvBind. TODO: Replace with ghc panic"
 
-lookupInScope :: String -> TcM (Maybe Name)
+lookupInScope :: String -> TcPluginM (Maybe Id)
 lookupInScope str = do
-  hscEnv <- TcRn.getTopEnv
-  let ns = (concatMap squash $ concatMap (md_exports . hm_details . snd) (udfmToList $ hsc_HPT hscEnv))
-      squash (Avail n) = [n]
-      squash (AvailTC _ ns _) = ns
-      mn = find (\x -> getOccString x == str) ns
+  mn <- case splitOnMany '.' str of
+    [x] -> unsafeTcPluginTcM $ lookupOccRn_maybe (mkVarUnqual (fsLit x))
+    xs  -> unsafeTcPluginTcM $ lookupOccRn_maybe (mkRdrQual (mkModName (init xs)) (mkVarOcc (last xs)))
   case mn of
-    Nothing -> error "Panic: not found in homepackagetable"
-    Just n -> pprTraceIt "mn: " ns `seq` pure mn
+    Just n  -> unsafeTcPluginTcM $ tcLookupIdMaybe n
+    Nothing -> pure Nothing
 
+  where mkModName = mkModuleName . intercalate "."
 
-mkNewExprRn :: Type -> String -> TcM (LHsExpr GhcTc)
-mkNewExprRn ty s = do
-  -- The names we want to use happen to already be in PrelNames so we use
-  -- them directly.
-  let v = mkRdrUnqual (mkVarOcc s)
-  v' <- lookupOccRn v
-  let raw_expr = nlHsVar v'
-      exp_type = ty
-  typecheckExpr exp_type raw_expr
-
--- | Check that an expression has the expected type.
-typecheckExpr :: Type -> LHsExpr GhcRn -> TcM (LHsExpr GhcTc)
-typecheckExpr t e = do
-  -- Typecheck the expression and capture generated constraints
-  (unwrapped_expr, wanteds) <- captureConstraints (tcMonoExpr e (Check t))
-  -- Create the wrapper
-  wrapper <- mkWpLet . EvBinds . evBindMapBinds . snd
-              <$> runTcS ( solveWanteds wanteds )
-  -- Apply the wrapper
-  let final_expr = mkLHsWrap wrapper unwrapped_expr
-  -- Zonk to instantiate type variables
-  zonkTopLExpr final_expr
-
-mkExprRn :: String -> Type -> TcM (LHsExpr GhcTc)
-mkExprRn var varTyp = do
-  let varOcc = mkRdrUnqual (mkVarOcc var)
-  varName <- lookupOccRn varOcc
-  typecheckExpr varTyp (nlHsVar varName) 
+splitOnMany :: Char -> String -> [String]
+splitOnMany delim s =
+  let (spl, cur) = foldl' (\(spl, cur) a -> case a == delim of
+                              True -> (reverse cur : spl, [])
+                              False -> (spl, a : cur)
+                          ) ([], []) s
+  in reverse (reverse cur : spl)
   
-mkNewBind :: String -> Type -> ModSummary -> LHsExpr GhcTc -> TcM (LHsBinds GhcTc)
-mkNewBind varStr varTyp ms varRhs = do
-  let varName = "mono_" ++ varStr
-  bind_name <- newGlobalBinder (ms_mod ms) (mkVarOcc varName) noSrcSpan
-  let
-    bind_id = mkVanillaGlobal bind_name varTyp
-    bind = FunBind emptyNameSet (noLoc bind_id) mg idHsWrapper []
 
-    mg = MG mg_tc (noLoc [match]) Generated
-    mg_tc = MatchGroupTc [] varTyp
 
-    match = noLoc (Match noExt match_ctxt [] grhss)
-    match_ctxt = FunRhs (noLoc bind_name) Prefix SrcLazy
 
-    grhss = GRHSs noExt [(noLoc (GRHS noExt [] varRhs))] (noLoc (EmptyLocalBinds noExt))
-  return (unitBag (noLoc bind))
+
+
+
+
+
+
+
+

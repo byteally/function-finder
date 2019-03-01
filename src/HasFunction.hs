@@ -17,7 +17,7 @@ class HasFunction (lab :: Symbol) (sig :: Type) where
 
 type family BindingNotFound (s :: Symbol) :: Constraint where
   BindingNotFound s =
-    TypeError ('Text "A (local) binding with name: " ':$$:
+    TypeError ('Text "A binding with name: " ':$$:
                'ShowType s ':$$:
                'Text "was not found in scope"
               )

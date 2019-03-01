@@ -18,8 +18,11 @@ class TFCls (a :: k) where
 instance TFCls (a :: Bool) where
   tfmeth _ = id
 
-tffun :: TF True -> TF True
+tffun :: TF 'True -> TF 'True
 tffun = tfmeth (Proxy :: Proxy 'True)
+
+test_id :: a -> String
+test_id = const "ffo"
 
 class MethTest (a :: Type) where
   methTest :: a -> String
